@@ -86,11 +86,10 @@ try:
             filepath = cache["saved_path"]
             filename = cache["filename"]
         else:
-            import folder_paths as fp
             prefix   = str(data.get("filename_prefix",
                            cache.get("filename_prefix", "sprite_sheet")))
             filename = f"{prefix}.png"
-            filepath = os.path.join(fp.get_output_directory(), filename)
+            filepath = os.path.join(folder_paths.get_output_directory(), filename)
 
         Image.fromarray(sheet, "RGBA").save(filepath)
         print(f"[SpriteSheetExtractor] Saved (interactive): {filepath}")
