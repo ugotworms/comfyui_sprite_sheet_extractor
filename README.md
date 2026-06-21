@@ -1,6 +1,6 @@
 # Sprite Sheet Extractor
 
-Two nodes for extracting sprite sheets from WAN (or any batch) video output.
+Two nodes for extracting square-frame sprite sheets from WAN (or any batch) video output. These nodes were made to enable a workflow of using WAN2.2 to generate a few frames of low resolution video (at least 25 in my tests), extract n frames evenly spaced out (always including the start frame), perform background removal and pixel color snapping, then recombine them into a horizontal sprite sheet at the specified resolution (square). 
 
 **SpriteSheetExtractor** samples evenly-spaced frames from an IMAGE batch, removes the generated background via per-frame YCbCr chroma keying with flood-fill, and saves a horizontal RGBA sprite sheet PNG. An interactive **Tweak Tolerance** panel lets you adjust the chroma-key threshold after generation without re-running the pipeline.
 
