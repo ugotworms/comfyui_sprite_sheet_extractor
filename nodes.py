@@ -19,6 +19,7 @@ import torch
 from PIL import Image
 
 import folder_paths
+from .pixel_snapper import apply_pixel_snap, SnapConfig
 
 # ---------------------------------------------------------------------------
 # Pillow NEAREST constant — compatible with both old and new Pillow.
@@ -536,6 +537,34 @@ class SpriteSheetExtractor:
                     "tooltip": "Output filename prefix.  Each run auto-increments the "
                                "counter:  sprite_sheet_00001_.png, _00002_.png …",
                 }),
+                "pixel_snap": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Pixelate each frame with the grid-snapping pipeline after "
+                               "downscaling.  The snapped image is always resized back to "
+                               "target_size so the canvas and subject-to-frame ratio are "
+                               "preserved regardless of snap_pixel_size.",
+                }),
+                "snap_pixel_size": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 32.0, "step": 1.0,
+                    "display": "number",
+                    "tooltip": "Pixel-art cell size in source pixels.  "
+                               "0.0 = auto-detect the natural grid from gradient peaks.  "
+                               "Valid override values start at 1.0.  Non-integer values "
+                               "(e.g. 7.0, 6.5) are fully supported — the output is always "
+                               "nearest-neighbour upscaled back to target_size so the "
+                               "subject ratio is identical to the input.",
+                }),
+                "snap_colors": ("INT", {
+                    "default": 16, "min": 2, "max": 64, "step": 2,
+                    "display": "number",
+                    "tooltip": "K-Means palette size used during pixel snapping.  "
+                               "The frame is quantised to this many colours before the "
+                               "grid is detected — fewer colours simplify the image more "
+                               "aggressively and give cleaner block edges; more colours "
+                               "preserve finer detail before snapping.  "
+                               "8 = maximum simplification, 32 = fine detail.  "
+                               "Has no effect when pixel_snap is off.",
+                }),
             },
             "hidden": {
                 "unique_id": "UNIQUE_ID",
@@ -560,6 +589,9 @@ class SpriteSheetExtractor:
         buffer_colors:     int,
         buffer_threshold:  float,
         filename_prefix:   str,
+        pixel_snap:        bool,
+        snap_pixel_size:   float,
+        snap_colors:       int,
         unique_id:         str,
     ):
         """
@@ -575,7 +607,30 @@ class SpriteSheetExtractor:
             else [min(round(B * i / count), B - 1) for i in range(count)]
         )
 
-        # Decode → center-crop to square → nearest-neighbour downscale
+        # Build SnapConfig once — config is the same for every frame.
+        # snap_pixel_size is clamped against the CROPPED source size (not
+        # target_size) because pixel snap runs before the PIL downscale.
+        # For WAN 2.2 at 768 px with snap_pixel_size=8: 768÷8 = 96 cells →
+        # the snap output already equals target_size with no resize needed.
+        if pixel_snap:
+            input_side = min(images.shape[1], images.shape[2])
+            _eff_size = snap_pixel_size
+            if _eff_size != 0.0:
+                _max_override = input_side / 2.0
+                if _eff_size > _max_override:
+                    print(
+                        f"[SpriteSheetExtractor] snap_pixel_size {_eff_size} clamped to "
+                        f"{_max_override} (input_side/2)"
+                    )
+                    _eff_size = _max_override
+            snap_cfg = SnapConfig(pixel_size_override=_eff_size, k_colors=snap_colors)
+
+        # Decode → center-crop to square → pixel snap on full-res (if enabled)
+        # → nearest-neighbour downscale to target_size.
+        # Snapping at full resolution is essential: at target_size (e.g. 96 px),
+        # snap_pixel_size=8 would give only 12×12 art pixels, which looks
+        # extremely blocky.  On the full-res source (e.g. 768 px), the same
+        # snap_pixel_size=8 gives 96×96 art pixels — exactly target_size.
         raw_frames: list[np.ndarray] = []
         for idx in indices:
             frame_f  = images[idx].cpu().numpy()                        # (H, W, C) 0-1
@@ -583,13 +638,38 @@ class SpriteSheetExtractor:
             H, W     = frame_u8.shape[:2]
             side     = min(H, W)
             sy, sx   = (H - side) // 2, (W - side) // 2
-            cropped  = frame_u8[sy:sy + side, sx:sx + side, :3]
-            pil      = Image.fromarray(cropped).resize((target_size, target_size), _NEAREST)
-            raw_frames.append(np.array(pil))
+            cropped  = frame_u8[sy:sy + side, sx:sx + side, :3]        # full-res square
 
-        # Optional: snap frames 1..n to frame 0's palette before keying.
-        # Done here so the cache holds locked frames and the interactive
-        # Tweak Tolerance panel also benefits from drift correction.
+            if pixel_snap:
+                try:
+                    snapped = apply_pixel_snap(cropped, snap_cfg)
+                    # Resize snap output to target_size.  When snap_pixel_size
+                    # divides the source side exactly (e.g. 768÷8=96) the snap
+                    # output is already target_size and this is a no-op.
+                    frame_np = np.array(
+                        Image.fromarray(snapped).resize(
+                            (target_size, target_size), _NEAREST
+                        )
+                    )
+                except Exception as exc:
+                    print(
+                        f"[SpriteSheetExtractor] pixel_snap failed for frame {idx}: {exc}"
+                    )
+                    frame_np = np.array(
+                        Image.fromarray(cropped).resize(
+                            (target_size, target_size), _NEAREST
+                        )
+                    )
+            else:
+                frame_np = np.array(
+                    Image.fromarray(cropped).resize((target_size, target_size), _NEAREST)
+                )
+            raw_frames.append(frame_np)
+
+        # Optional: palette-lock to fix temporal colour drift.
+        # Runs after pixel snap (on target_size frames) — the two stages no
+        # longer conflict because snap operated at full resolution and lock
+        # operates at target_size.
         if palette_lock and len(raw_frames) > 1:
             if remove_background:
                 bg_mask_0     = compute_background_mask(raw_frames[0], tolerance)

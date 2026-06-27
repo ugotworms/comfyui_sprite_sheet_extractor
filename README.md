@@ -1,6 +1,6 @@
 # Sprite Sheet Extractor
 
-Two nodes for extracting square-frame sprite sheets from WAN (or any batch) video output. These nodes were made to enable a workflow of using WAN2.2 to generate a few frames of low resolution video (at least 25 in my tests), extract n frames evenly spaced out (always including the start frame), perform background removal and pixel color snapping, then recombine them into a horizontal sprite sheet at the specified resolution (square). 
+Two nodes for extracting square-frame sprite sheets from WAN (or any batch) video output. These nodes were made to enable a workflow of using WAN 2.2 to generate a few frames of low resolution video (at least 25 in my tests), extract n frames evenly spaced out (always including the start frame), perform background removal and pixel-art snapping, then recombine them into a horizontal sprite sheet at the specified resolution (square).
 
 **SpriteSheetExtractor** samples evenly-spaced frames from an IMAGE batch, removes the generated background via per-frame YCbCr chroma keying with flood-fill, and saves a horizontal RGBA sprite sheet PNG. An interactive **Tweak Tolerance** panel lets you adjust the chroma-key threshold after generation without re-running the pipeline.
 
@@ -11,6 +11,7 @@ Two nodes for extracting square-frame sprite sheets from WAN (or any batch) vide
 - Per-frame background detection and removal using YCbCr chroma keying with border-seeded flood fill — handles WAN temporal drift, shadows, and gradients
 - Fringe softening and spill suppression for clean anti-aliased edges
 - **Palette lock** — snap frames 1..n to frame 0's colour palette to fix temporal colour drift while preserving transient effects (fireballs, hit flashes, etc.)
+- **Pixel snap** — K-Means quantise + gradient-grid detection collapses each frame to clean pixel-art blocks; output is always resized back to `target_size` so the subject-to-frame ratio is preserved
 - Interactive tolerance adjustment via a floating UI panel — no need to re-generate
 - Even temporal sampling — generate more frames than needed and pick N evenly-spaced ones
 - Auto-incrementing filenames — never silently overwrites a previous run
@@ -32,6 +33,9 @@ Two nodes for extracting square-frame sprite sheets from WAN (or any batch) vide
 | `buffer_colors` | `INT` | 8 | Extra palette slots for transient colours |
 | `buffer_threshold` | `FLOAT` | 30.0 | RGB distance above which a colour is treated as transient |
 | `filename_prefix` | `STRING` | `sprite_sheet` | Output filename prefix |
+| `pixel_snap` | `BOOLEAN` | False | Enable pixel-art grid snapping on each frame |
+| `snap_pixel_size` | `FLOAT` | 0.0 | Cell size in source pixels. `0.0` = auto-detect from gradient peaks; `1.0`+ = explicit override. For WAN 768 px output with `target_size=96`, use `8` (768÷8=96). Non-integer values are supported. |
+| `snap_colors` | `INT` | 16 | K-Means palette size used during snapping (2–64). Fewer = more aggressive simplification; more = finer detail preserved before snapping |
 
 | Output | Type | Description |
 |---|---|---|
@@ -82,16 +86,35 @@ None beyond ComfyUI's built-in requirements (PyTorch, numpy, Pillow).
 
 ### Palette Lock
 
-Enable `palette_lock` when WAN output shows colour drift between frames (e.g., the character's clothing shifts hue). The node extracts a palette from frame 0 and snaps subsequent frames to it. Set `buffer_colors` to leave room for genuine transient effects.
+Enable `palette_lock` when WAN output shows colour drift between frames (e.g. the character's clothing shifts hue). The node extracts a palette from frame 0 and snaps subsequent frames to it. Set `buffer_colors` to leave room for genuine transient effects.
+
+### Pixel Snap
+
+Enable `pixel_snap` to convert each frame into clean pixel-art blocks before compositing the sprite sheet. The pipeline:
+
+1. Quantises the **full-resolution** cropped frame to `snap_colors` colours via K-Means (simplifies gradients so grid edges are sharp)
+2. Detects the pixel grid from horizontal/vertical gradient peaks
+3. Resamples each detected cell to its dominant colour
+4. Nearest-neighbour resizes the result to `target_size` — the subject-to-frame ratio is preserved because the snap ran before the downscale
+
+**Why full resolution matters**: if snap ran at `target_size` (e.g. 96 px), `snap_pixel_size=8` would produce only 12×12 art pixels — extremely blocky 8×8-pixel blocks. At the source resolution (e.g. 768 px), the same `snap_pixel_size=8` produces 96×96 art pixels, which is exactly `target_size` with correct detail.
+
+**`snap_pixel_size`** controls the cell size in source pixels:
+- `0.0` — auto-detect from the image's gradient profile
+- `1.0`+ — explicit cell size; for WAN 768 px output the formula is `source_size ÷ target_size` (e.g. 768÷96 = **8**). Non-integer values like `6.5` are fully supported.
+
+When both `palette_lock` and `pixel_snap` are enabled, pixel snap runs first on the full-resolution source, then palette lock runs on the downscaled target-size frames — the two quantisation stages operate at different scales and no longer conflict.
 
 ## Limitations
 
 - Background detection assumes the character is roughly center-aligned with a solid-colour border ring — works best with WAN 2.x output
 - The preview animation canvas may not resize immediately on the first run; re-running the preview node resolves it
 - `SpriteSheetPreview` relies on ComfyUI's temp file system — clearing temp files will break active previews until the next run
+- Pixel snap auto-detection (`snap_pixel_size = 0.0`) works best on frames with visible, regular grid structure; heavily blurred or noisy frames may benefit from an explicit `snap_pixel_size` override instead
 
 ## Changelog
 
+- **1.1.0** — Pixel snap integration (`pixel_snap`, `snap_pixel_size`, `snap_colors`); palette lock now runs before pixel snap when both are enabled; memory optimisations in the snap pipeline
 - **1.0.0** — Initial release with SpriteSheetExtractor and SpriteSheetPreview
 
 ## License
